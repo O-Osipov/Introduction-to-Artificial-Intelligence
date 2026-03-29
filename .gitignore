@@ -1,0 +1,12 @@
+#ignore all files
+*
+#unignore directoires
+!*/
+/Lab1/archive
+/Lab1/data_mnist
+/Lab1/tmp
+
+#unignore specified files
+!*.py
+!*.zip
+!.gitignore
