@@ -189,7 +189,7 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-    epochs = 20
+    epochs = 10
     train_losses = []
     train_accuracies = []
     test_losses = []
