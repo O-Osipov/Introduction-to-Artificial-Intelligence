@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset, random_split, Dataset
+import torchvision.transforms as transforms
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,9 +12,9 @@ from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
 # ---------------------------------------------------------
-# Глобальные константы (для доступа из process_image)
+# Глобальные константы
 # ---------------------------------------------------------
-IMG_SIZE = 64  # ← ИСПРАВЛЕНО: вынесли как глобальную константу
+IMG_SIZE = 64
 
 # ---------------------------------------------------------
 # 1. Функция обработки изображения (на верхнем уровне!)
@@ -54,7 +55,7 @@ class SimpleCNN(nn.Module):
 # ---------------------------------------------------------
 def load_simpsons_dataset(dataset_path='./archive/simpsons_dataset', img_size=64):
     """Загрузка и предобработка датасета Симпсонов"""
-    global IMG_SIZE  # ← ИСПРАВЛЕНО: используем глобальную константу
+    global IMG_SIZE
     IMG_SIZE = img_size
     
     print("Загрузка данных...")
@@ -97,7 +98,33 @@ def load_simpsons_dataset(dataset_path='./archive/simpsons_dataset', img_size=64
     return df, label_to_idx, len(labels_unique)
 
 # ---------------------------------------------------------
-# 4. Основная функция
+# 4. Кастомный Dataset с поддержкой трансформов
+# ---------------------------------------------------------
+class SimpsonsDataset(Dataset):
+    """Кастомный датасет с применением трансформов"""
+    def __init__(self, X, Y, transforms=None):
+        self.X = X  # numpy array (N, H, W, C)
+        self.Y = Y  # numpy array (N,)
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        img = self.X[idx]
+        label = self.Y[idx]
+        
+        # Конвертируем numpy array в PIL Image для transforms
+        img = Image.fromarray((img * 255).astype(np.uint8))
+        
+        # Применяем трансформы (аугментацию)
+        if self.transforms:
+            img = self.transforms(img)
+        
+        return img, label
+
+# ---------------------------------------------------------
+# 5. Основная функция
 # ---------------------------------------------------------
 def main():
     # Проверка доступности GPU
@@ -112,32 +139,57 @@ def main():
     # Подготовка данных
     X = np.stack(df['pixels'].values).astype(np.float32) / 255.0
     Y = df['label_idx'].values.astype(np.int64)
-    X = X.transpose(0, 3, 1, 2)
 
     print(f"Всего samples: {X.shape[0]}, Форма: {X.shape}")
 
+    # -----------------------------------------------------
+    # ДОБАВЛЕНО: Аугментация данных
+    # -----------------------------------------------------
+    # Трансформы для обучения (с аугментацией)
+    train_transforms = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.5),      # Случайный горизонтальный переворот
+        transforms.RandomRotation(15),               # Случайный поворот до 15 градусов
+        transforms.ColorJitter(brightness=0.2,       # Изменение яркости
+                               contrast=0.2,         # Изменение контраста
+                               saturation=0.2),      # Изменение насыщенности
+        transforms.ToTensor(),                       # Конвертация в тензор [0, 1]
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],  # Нормализация (ImageNet stats)
+                             std=[0.229, 0.224, 0.225])
+    ])
+
+    # Трансформы для тестирования (без аугментации)
+    test_transforms = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
+    # -----------------------------------------------------
+
     # Разделение на Train/Test (80/20)
-    tensor_x = torch.tensor(X, device=device)
-    tensor_y = torch.tensor(Y, device=device)
+    train_size = int(0.8 * len(X))
+    test_size = len(X) - train_size
     
-    dataset = TensorDataset(tensor_x, tensor_y)
-    
-    train_size = int(0.8 * len(dataset))
-    test_size = len(dataset) - train_size
-    
-    train_dataset, test_dataset = random_split(dataset, [train_size, test_size], 
-                                               generator=torch.Generator().manual_seed(42))
+    indices = torch.randperm(len(X)).tolist()
+    train_indices = indices[:train_size]
+    test_indices = indices[train_size:]
+
+    X_train, Y_train = X[train_indices], Y[train_indices]
+    X_test, Y_test = X[test_indices], Y[test_indices]
+
+    # Создание датасетов с трансформами
+    train_dataset = SimpsonsDataset(X_train, Y_train, transforms=train_transforms)
+    test_dataset = SimpsonsDataset(X_test, Y_test, transforms=test_transforms)
 
     batch_size = 64
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Инициализация модели
     model = SimpleCNN(num_classes=num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-    epochs = 10
+    epochs = 20
     train_losses = []
     train_accuracies = []
     test_losses = []
@@ -155,6 +207,8 @@ def main():
         total = 0
 
         for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -177,6 +231,8 @@ def main():
 
         with torch.no_grad():
             for inputs, labels in test_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 
@@ -215,9 +271,9 @@ def main():
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('training_plot.png', dpi=150)
+    plt.savefig('training_plot_augmented.png', dpi=150)
     plt.show()
-    print("\nГрафик сохранён в 'training_plot.png'")
+    print("\nГрафик сохранён в 'training_plot_augmented.png'")
 
 if __name__ == "__main__":
     main()
